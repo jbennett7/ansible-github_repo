@@ -1,0 +1,34 @@
+---
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Create
+      github_repo:
+        name: "hello2"
+        orgname: "jbennett7"
+        description: "Hello World"
+        state: "present"
+        has_issues: True
+        private: False
+        has_wiki: False
+        allow_rebase_merge: False
+        allow_merge_commit: True
+        allow_squash_merge: True
+        label_list:
+          - name: "label1"
+            color: "10fffa"
+          - name: "label2"
+            color: "13d4fa"
+      tags:
+          - create_repo
+          - test
+    - name: Delete
+      github_repo:
+          name: "hello2"
+          orgname: "jbennett7"
+          state: "absent"
+      tags:
+          - delete_repo
+          - test
