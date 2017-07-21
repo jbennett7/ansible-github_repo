@@ -1,11 +1,10 @@
 #!/usr/bin/python
 
-from pygithub3 import Github
-from pygithub3.exceptions import UnprocessableEntity, NotFound
 from os import environ
 from requests.exceptions import HTTPError
 import yaml
 import json
+import requests
 import re
 
 class AuthenticationError(Exception):
@@ -14,91 +13,52 @@ class AuthenticationError(Exception):
 class ImmutableLabels(Exception):
     pass
 
-class GithubRepositoryConfiguration(object):
-    def __init__(self, name="", description=None, has_issues=True, has_projects=True, has_wiki=False, homepage="", private=True):
-        assert isinstance(has_issues, bool), "<has_issues> has to be a boolean value."
-        assert isinstance(has_projects, bool), "<has_projects> has to be a boolean value."
-        assert isinstance(has_wiki, bool), "<has_wiki> has to be a boolean value."
-        assert isinstance(private, bool), "<private> has to be a boolean value."
-        self._config = {
-                "name": name,
-                "description": description,
-                "has_issues": has_issues,
-                "has_projects": has_projects,
-                "has_wiki": has_wiki,
-                "homepage": homepage,
-                "private": private}
-
-    def __getitem__(self,key):
-        assert key in self._config.keys(), "<{}> is not a configuration value.".format(key)
-        return self._config[key]
-
-    def get_config(self):
-        return self._config
-
-class GithubConnection(object):
-    def __init__(self, token, org, repo):
-        assert token, "An authorization token needs to be provided"
-        assert org, "An organization needs to be provided"
-        assert repo, "The repository name needs to be provided"
-        self._connection = Github(token=token, user=org, repo=repo)
-        try:
-            org_list = self._connection.orgs.list().all()
-            assert any(o.login == org for o in org_list), "Incorrect organization specified"
-        except HTTPError as e:
-            raise AuthenticationError, "The authentication token does not work: {}".format(str(e))
-
-    def get_connection(self):
-        return self._connection
-
 class GithubRepository(object):
     def __init__(self, token, org, repo):
         self._connection = GithubConnection(token, org, repo).get_connection()
-        try:
-            self._retrieve_repository(org, repo)
-            self.exists = True
-        except NotFound:
-            self._config = GithubRepositoryConfiguration(name=repo)
-            self.exists = False
-  
+        self._header = { 'Authorization': 'token {}'.format(token) }
+        self._url = "https://api.github.com/repos/{}/{}".format(org,repo)
+        self._create_repo_url = "https://api.github.com/orgs/{}/repos".format(org)
+        self._repo = repo
+        self._org = org
+        self.create_repository()
+
     def create_repository(self):
-        self._connection.repos.create(self._config.get_config())
-        self.exists = True
-  
-    def _retrieve_repository(self, org, repo):
-        r = self._connection.repos.get(org, repo)
-        self._config = GithubRepositoryConfiguration(
-                r.name,
-                r.description,
-                r.has_issues,
-                r.has_projects,
-                r.has_wiki,
-                r.homepage,
-                r.private)
-        self._labels = []
-        label_list = self._connection.issues.labels.list().all()
-        for label in label_list:
-            self._labels.append({"name": label.name, "color": label.color})
-  
+        r = requests.get(self._url,headers=self._header)
+        if r.status_code != 200:
+            r = requests.post(self._create_repo_url,json.dumps(dict(name=self._repo)))
+            self.exists = True
+            self.changed = True
+        self._config = r.json()
+        return r.status_code
+
     def get_config(self):
-        try:
-            return self._config.get_config()
-        except AttributeError:
-            return {}
+        return self._config
   
-    def set_config(self, config):
-        assert isinstance(config, GithubRepositoryConfiguration), "Specify a GithubRepositoryConfiguration Object"
-        assert config["name"], "A name needs to be added"
-        self._config = config
+    def set_config_var(self, key, value):
+        assert self._config.has_key(key), "{} is not a configurable value".format(key)
+        self._config[key] = value
   
+    def configs_equal(self, config):
+        for key in config.keys():
+            if self._config[key] != config[key]:
+                return False
+        return True
+
     def sync_config(self):
-        self._connection.repos.update(self._config.get_config())
+        # Update does not work with allow_squash_merge, allow_rebase_merge, or allow_merge_commits.
+        url = "https://api.github.com/repos/{}/{}".format(self._org,self._repo)
+        r = requests.post(url,json.dumps(self.get_config()),headers=self._header)
+        return "{}:  {}".format(r.text,url)
   
     def get_labels(self):
-        try:
-            return self._labels
-        except AttributeError:
-            return []
+        label_url = re.sub('{/name}','',self._config['labels_url'])
+        label_list = requests.get(label_url,headers=self._header).json()
+
+    def labels_equal(self, label_list):
+        cur_label_list = self.get_labels()
+        if len(cur_label_list) != len(label_list):
+            return False
   
     def set_labels(self, label_list):
         assert isinstance(label_list, list), "label_list must be a list"
@@ -154,9 +114,6 @@ def github_repository_present(params):
     label_changes = []
     gh = GithubRepository(token, orgname, params['name'])
     cur_config = gh.get_config()
-    if gh.exists == False:
-        gh.create_repository()
-        has_changed = True
     for key in params:
         if params[key] != cur_config[key]:
             config_changes.append("{}: {} => {}".format(key, cur_config[key], params[key]))
@@ -169,9 +126,15 @@ def github_repository_present(params):
             has_projects = params['has_projects'],
             has_wiki = params['has_wiki'],
             homepage = params['homepage'],
+            allow_squash_merge = params['allow_squash_merge'],
+            allow_merge_commit = params['allow_merge_commit'],
+            allow_rebase_merge = params['allow_rebase_merge'],
             private = params['private']
         ))
-        gh.sync_config()
+        if gh.exists == False:
+            gh.create_repository()
+            has_changed = True
+        result = gh.sync_config()
     old_labels = gh.get_labels() 
     if not sorted(old_labels) == sorted(label_list):
         gh.set_labels(label_list)
@@ -189,7 +152,20 @@ def github_repository_present(params):
     return is_error, has_changed, result
 
 def github_repository_absent(params):
-    return False, False, { "msg": "Not Implemented" }
+    has_changed = False
+    is_error = False
+    token = params['token']
+    orgname = params['orgname']
+    label_list = params['label_list']
+    del params['state']
+    del params['token']
+    del params['orgname']
+    del params['label_list']
+    gh = GithubRepository(token, orgname, params['name'])
+    if gh.exists:
+        has_changed = True
+        gh.delete_repo()
+    return is_error, has_changed, { "msg": "{} deleted.".format(params['name']) }
 
 from ansible.module_utils.basic import *
 if __name__ == '__main__':
@@ -209,6 +185,9 @@ if __name__ == '__main__':
             has_wiki = dict(type = 'bool', required = False, default = False),
             homepage = dict(type = 'str', required = False, default = ""),
             label_list = dict(type = 'list', required = False, default = []),
+            allow_squash_merge = dict(type = 'bool', required = False, default = True),
+            allow_merge_commit = dict(type = 'bool', required = False, default = True),
+            allow_rebase_merge = dict(type = 'bool', required = False, default = True),
             state = dict(type = 'str', required = False, default = 'present', choices = ['present', 'absent'])
     )
 
