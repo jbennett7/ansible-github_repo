@@ -59,7 +59,7 @@ class GithubRepository(object):
     def create_repository(self):
         r = requests.get(self._url, headers=self._header)
         if r.status_code != OK:
-            r = requests.post(self._org_create_repo_url, data=json.dumps(
+            r = requests.post(self._user_create_repo_url, data=json.dumps(
                 dict(name=self._repo)), headers=self._header)
             if r.status_code != CREATED:
                 r = requests.post(self._org_create_repo_url, data=json.dumps(dict(name=self._repo)), headers=self._header)
@@ -81,12 +81,11 @@ class GithubRepository(object):
         return True
 
     def sync_config(self):
-        # Update does not work with allow_squash_merge, allow_rebase_merge, or allow_merge_commits.
         r = requests.post(
             self._url,
             json.dumps(self.get_config()),
             headers=self._header)
-        return r, self._url, self.get_config()
+        return r #, self._url, self.get_config()
 
     def get_labels(self):
         label_list = requests.get(
@@ -167,9 +166,6 @@ def github_repository_present(params):
             gh.set_config_var(key, params[key])
             results, url, config = gh.sync_config()
     message['msg']['repo_config_changes'] = config_changes
-    message['msg']['repo_config_changes_status'] = results.status_code
-    message['msg']['repo_config_changes_url'] = url
-    message['msg']['repo_config_changes_config'] = config
     current_label_list = list(dict((k, label[k]) for k in ['name', 'color']) for label in gh.get_labels())
     if label_list != current_label_list:
         deleted_labels, added_labels, changed_labels = gh.set_labels(
